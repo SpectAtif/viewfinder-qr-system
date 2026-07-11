@@ -1,0 +1,14 @@
+{
+  "items": [
+    {
+      "id": "bb2f810f06",
+      "name": "cafe",
+      "target": "http://zoma.to/r/20267557",
+      "category": "",
+      "type": "dynamic",
+      "active": true,
+      "createdAt": 1783804254537,
+      "scans": []
+    }
+  ]
+}
