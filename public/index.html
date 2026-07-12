@@ -140,6 +140,20 @@
     <div class="field"><label>Name</label><input id="nameInput" placeholder="e.g. Storefront Poster"></div>
     <div class="field"><label>Destination URL</label><input id="urlInput" placeholder="https://example.com"></div>
     <div class="field"><label>Category</label><input id="categoryInput" placeholder="e.g. Marketing (optional)"></div>
+    <div class="field">
+    <label>Category</label>
+    <input id="categoryInput" placeholder="e.g. Marketing (optional)">
+</div>
+
+<hr style="border:none;border-top:1px solid #333;margin:18px 0;">
+
+<h4 style="margin-bottom:12px;">🎨 Live QR Preview</h4>
+
+<div style="display:flex;justify-content:center;">
+    <div id="qrPreview"></div>
+</div>
+
+<div class="modal-foot">
     <div class="modal-foot">
       <button class="btn btn-ghost" id="cancelModal">Cancel</button>
       <button class="btn btn-primary" id="saveModal">Save</button>
@@ -185,6 +199,39 @@
   let editingId = null;
   let selectedType = "dynamic";
   let drawerId = null;
+  let qrPreview = null;
+
+function createStyledQR(text) {
+  if (!qrPreview) {
+    qrPreview = new QRCodeStyling({
+      width: 250,
+      height: 250,
+      data: text,
+      image: "",
+      dotsOptions: {
+        color: "#111827",
+        type: "rounded"
+      },
+      cornersSquareOptions: {
+        type: "extra-rounded",
+        color: "#111827"
+      },
+      cornersDotOptions: {
+        type: "dot",
+        color: "#111827"
+      },
+      backgroundOptions: {
+        color: "#ffffff"
+      }
+    });
+
+    qrPreview.append(document.getElementById("qrPreview"));
+  } else {
+    qrPreview.update({
+      data: text
+    });
+  }
+}
 
   async function api(path, opts){
     const res = await fetch(path, Object.assign({ headers: {"Content-Type":"application/json"} }, opts||{}));
@@ -252,7 +299,7 @@
           <span class="badge ${paused ? 'paused' : item.type}">${paused ? 'paused' : item.type}</span>
         </div>
         <div class="qrwrap"><div class="corner tl"></div><div class="corner tr"></div><div class="corner bl"></div><div class="corner br"></div>
-          <img src="/api/items/${item.id}/qr.png?size=300" alt="QR for ${escapeHtml(item.name)}">
+          <img src="/qr/${item.id}" alt="QR for ${escapeHtml(item.name)}">
         </div>
         <div class="card-url">${escapeHtml(item.shortUrl)}</div>
         <div class="card-foot">
@@ -282,28 +329,33 @@
 
   // ---------- MODAL ----------
   function openModal(){
-    editingId = null;
-    selectedType = "dynamic";
-    document.getElementById("modalTitle").textContent = "New QR Code";
-    document.getElementById("nameInput").value = "";
-    document.getElementById("urlInput").value = "";
-    document.getElementById("categoryInput").value = "";
-    setTypeUI("dynamic");
-    document.getElementById("modalOverlay").classList.add("open");
-  }
-  function closeModal(){ document.getElementById("modalOverlay").classList.remove("open"); }
-  function setTypeUI(type){
-    selectedType = type;
-    document.getElementById("typeDynamic").classList.toggle("sel", type==="dynamic");
-    document.getElementById("typeStatic").classList.toggle("sel", type==="static");
-    document.getElementById("typeHint").textContent = type==="dynamic"
-      ? "Dynamic codes route through this server — change the destination anytime, even after printing, and every scan is logged."
-      : "Static codes encode the destination directly. They work anywhere forever, but can't be edited later and scans aren't tracked.";
-  }
+  editingId = null;
+  selectedType = "dynamic";
+  document.getElementById("modalTitle").textContent = "New QR Code";
+  document.getElementById("nameInput").value = "";
+  document.getElementById("urlInput").value = "";
+  document.getElementById("categoryInput").value = "";
+  setTypeUI("dynamic");
+  document.getElementById("modalOverlay").classList.add("open");
+
+  createStyledQR("https://example.com");
+}
+  function closeModal() {
+  document.getElementById("modalOverlay").classList.remove("open");
+
+  const preview = document.getElementById("qrPreview");
+  if (preview) preview.innerHTML = "";
+
+  qrPreview = null;
+}
   document.getElementById("typeDynamic").onclick = ()=> setTypeUI("dynamic");
   document.getElementById("typeStatic").onclick = ()=> setTypeUI("static");
   document.getElementById("newBtn").onclick = openModal;
   document.getElementById("cancelModal").onclick = closeModal;
+  document.getElementById("urlInput").addEventListener("input", (e) => {
+  const value = e.target.value.trim();
+  createStyledQR(value || "https://example.com");
+});
   document.getElementById("modalOverlay").onclick = (e)=>{ if(e.target.id==="modalOverlay") closeModal(); };
 
   document.getElementById("saveModal").onclick = async ()=>{
@@ -328,7 +380,7 @@
     drawerId = id;
     const item = getItem(id);
     document.getElementById("dName").textContent = item.name;
-    document.getElementById("dQrImg").src = `/api/items/${item.id}/qr.png?size=400`;
+    document.getElementById("dQrImg").src = `/qr/${item.id}`;
     document.getElementById("dShortUrl").textContent = item.shortUrl;
     const scans = item.scans || [];
     document.getElementById("dScans").textContent = scans.length;
@@ -431,5 +483,6 @@
   })();
 })();
 </script>
+<script src="https://unpkg.com/qr-code-styling@1.9.2/lib/qr-code-styling.js"></script>
 </body>
 </html>

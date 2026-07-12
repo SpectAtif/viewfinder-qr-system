@@ -2,7 +2,7 @@ const express = require("express");
 const crypto = require("crypto");
 const QRCode = require("qrcode");
 const path = require("path");
-const { readAll, transact } = require("./db");
+const { pool, initDB } = require("./db");
 
 const app = express();
 app.use(express.json());
@@ -26,31 +26,7 @@ function shortUrl(req, item) {
   return item.type === "dynamic" ? `${baseUrl(req)}/r/${item.id}` : item.target;
 }
 
-// ---------- THE REDIRECT (this is what the printed QR code points to) ----------
-app.get("/r/:id", async (req, res) => {
-  const { id } = req.params;
-  const result = await transact((data) => {
-    const item = data.items.find((i) => i.id === id);
-    if (!item) return { status: "missing" };
-    if (item.active === false) return { status: "paused" };
-    item.scans = item.scans || [];
-    item.scans.push({
-      ts: Date.now(),
-      day: todayStr(),
-      ua: (req.headers["user-agent"] || "").slice(0, 200),
-      ref: (req.headers["referer"] || "").slice(0, 200),
-    });
-    return { status: "ok", target: item.target };
-  });
 
-  if (result.status === "missing") {
-    return res.status(404).send(renderMessage("Code not found", "This QR code doesn't exist (or was deleted)."));
-  }
-  if (result.status === "paused") {
-    return res.status(200).send(renderMessage("This code is paused", "The owner has temporarily disabled this destination."));
-  }
-  return res.redirect(302, result.target);
-});
 
 function renderMessage(title, sub) {
   return `<!DOCTYPE html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
@@ -62,85 +38,221 @@ function renderMessage(title, sub) {
 }
 
 // ---------- API ----------
-app.get("/api/items", async (req, res) => {
-  const data = readAll();
-  const items = data.items.map((i) => ({ ...i, shortUrl: shortUrl(req, i) }));
-  res.json({ items });
-});
-
-app.post("/api/items", async (req, res) => {
-  let { name, target, category, type } = req.body || {};
-  if (!name || !target) return res.status(400).json({ error: "name and target are required" });
-  if (!/^https?:\/\//i.test(target)) target = "https://" + target;
-  type = type === "static" ? "static" : "dynamic";
-
-  const item = {
-    id: crypto.randomBytes(5).toString("hex"),
-    name: String(name).slice(0, 120),
-    target,
-    category: category ? String(category).slice(0, 60) : "",
-    type,
-    active: true,
-    createdAt: Date.now(),
-    scans: [],
-  };
-  await transact((data) => data.items.push(item));
-  res.json({ item: { ...item, shortUrl: shortUrl(req, item) } });
-});
-
-app.put("/api/items/:id", async (req, res) => {
-  const { id } = req.params;
-  let { name, target, category, active } = req.body || {};
-  const result = await transact((data) => {
-    const item = data.items.find((i) => i.id === id);
-    if (!item) return null;
-    if (name !== undefined) item.name = String(name).slice(0, 120);
-    if (category !== undefined) item.category = String(category).slice(0, 60);
-    if (active !== undefined) item.active = !!active;
-    if (target !== undefined && item.type === "dynamic") {
-      if (!/^https?:\/\//i.test(target)) target = "https://" + target;
-      item.target = target;
-    }
-    return item;
-  });
-  if (!result) return res.status(404).json({ error: "not found" });
-  res.json({ item: { ...result, shortUrl: shortUrl(req, result) } });
-});
-
-app.delete("/api/items/:id", async (req, res) => {
-  const { id } = req.params;
-  await transact((data) => {
-    data.items = data.items.filter((i) => i.id !== id);
-  });
-  res.json({ ok: true });
-});
-
-// Server-rendered PNG — always downloadable, works for print (300+ DPI safe at 1024px).
-app.get("/api/items/:id/qr.png", async (req, res) => {
-  const data = readAll();
-  const item = data.items.find((i) => i.id === req.params.id);
-  if (!item) return res.status(404).end();
-  const size = Math.min(2048, Math.max(128, parseInt(req.query.size) || 1024));
-  const download = req.query.download === "1";
+app.get("/qr/:id", async (req, res) => {
   try {
-    const buffer = await QRCode.toBuffer(shortUrl(req, item), {
-      type: "png",
-      width: size,
-      margin: 2,
-      color: { dark: "#0B1120", light: "#FFFFFF" },
-      errorCorrectionLevel: "H",
-    });
-    res.setHeader("Content-Type", "image/png");
-    if (download) {
-      const fname = (item.name || "qr-code").replace(/[^a-z0-9]/gi, "_").toLowerCase() + "_qr.png";
-      res.setHeader("Content-Disposition", `attachment; filename="${fname}"`);
+    const { id } = req.params;
+
+    const result = await pool.query(
+      "SELECT * FROM items WHERE id = $1",
+      [id]
+    );
+
+    if (result.rows.length === 0) {
+      return res.status(404).send("QR not found");
     }
-    res.send(buffer);
-  } catch (e) {
-    res.status(500).json({ error: "qr generation failed" });
+
+    const item = result.rows[0];
+
+    const qrText =
+      item.type === "dynamic"
+        ? `${baseUrl(req)}/r/${item.id}`
+        : item.target;
+
+    const png = await QRCode.toBuffer(qrText, {
+      type: "png",
+      width: 512,
+      margin: 2,
+    });
+
+    res.setHeader("Content-Type", "image/png");
+    res.send(png);
+
+  } catch (err) {
+    console.error(err);
+    res.status(500).send("QR generation failed");
   }
 });
 
-app.listen(PORT, () => {
-  console.log(`VIEWFINDER QR server running on http://localhost:${PORT}`);
+app.post("/api/items", async (req, res) => {
+  try {
+    let { name, target, category, type } = req.body || {};
+
+    if (!name || !target) {
+      return res.status(400).json({
+        error: "name and target are required",
+      });
+    }
+
+    if (!/^https?:\/\//i.test(target)) {
+      target = "https://" + target;
+    }
+
+    type = type === "static" ? "static" : "dynamic";
+
+    const item = {
+      id: crypto.randomBytes(5).toString("hex"),
+      name: String(name).slice(0, 120),
+      target,
+      category: category ? String(category).slice(0, 60) : "",
+      type,
+      active: true,
+      createdAt: Date.now(),
+      scans: [],
+    };
+
+    await pool.query(
+      `
+      INSERT INTO items
+      (id,name,target,category,type,active,created_at,scans)
+      VALUES ($1,$2,$3,$4,$5,$6,$7,$8)
+      `,
+      [
+        item.id,
+        item.name,
+        item.target,
+        item.category,
+        item.type,
+        item.active,
+        item.createdAt,
+        JSON.stringify(item.scans),
+      ]
+    );
+
+    res.json({
+      item: {
+        ...item,
+        shortUrl:
+          item.type === "dynamic"
+            ? `${baseUrl(req)}/r/${item.id}`
+            : item.target,
+      },
+    });
+
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({
+      error: "Database Error",
+    });
+  }
 });
+app.put("/api/items/:id", async (req, res) => {
+  try {
+    const { id } = req.params;
+    let { name, target, category, active } = req.body;
+
+    if (target && !/^https?:\/\//i.test(target)) {
+      target = "https://" + target;
+    }
+
+    await pool.query(
+      `
+      UPDATE items
+      SET
+        name = COALESCE($1, name),
+        target = COALESCE($2, target),
+        category = COALESCE($3, category),
+        active = COALESCE($4, active)
+      WHERE id = $5
+      `,
+      [name, target, category, active, id]
+    );
+
+    const result = await pool.query(
+      "SELECT * FROM items WHERE id=$1",
+      [id]
+    );
+
+    if (result.rows.length === 0) {
+      return res.status(404).json({
+        error: "Item not found",
+      });
+    }
+
+    const item = result.rows[0];
+
+    res.json({
+      item: {
+        id: item.id,
+        name: item.name,
+        target: item.target,
+        category: item.category,
+        type: item.type,
+        active: item.active,
+        createdAt: Number(item.created_at),
+        scans: item.scans || [],
+        shortUrl:
+          item.type === "dynamic"
+            ? `${baseUrl(req)}/r/${item.id}`
+            : item.target,
+      },
+    });
+
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({
+      error: "Database Error",
+    });
+  }
+});
+
+app.delete("/api/items/:id", async (req, res) => {
+  try {
+    const { id } = req.params;
+
+    await pool.query(
+      "DELETE FROM items WHERE id = $1",
+      [id]
+    );
+
+    res.json({
+      ok: true,
+    });
+
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({
+      error: "Database Error",
+    });
+  }
+});
+
+// Server-rendered PNG — always downloadable, works for print (300+ DPI safe at 1024px).
+app.get("/api/items", async (req, res) => {
+  try {
+    const result = await pool.query(
+      "SELECT * FROM items ORDER BY created_at DESC"
+    );
+
+    const items = result.rows.map((row) => ({
+      id: row.id,
+      name: row.name,
+      target: row.target,
+      category: row.category,
+      type: row.type,
+      active: row.active,
+      createdAt: Number(row.created_at),
+      scans: row.scans || [],
+      shortUrl:
+        row.type === "dynamic"
+          ? `${baseUrl(req)}/r/${row.id}`
+          : row.target,
+    }));
+
+    res.json({ items });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: "Database Error" });
+  }
+});
+
+initDB()
+  .then(() => {
+    app.listen(PORT, () => {
+      console.log(`VIEWFINDER QR server running on http://localhost:${PORT}`);
+    });
+  })
+  .catch((err) => {
+    console.error("Database connection failed:");
+    console.error(err);
+    process.exit(1);
+  });
